@@ -1,0 +1,527 @@
+---
+title: "Region 5 results"
+author: "Jess Kunke"
+date: "Nov 2025"
+format: pdf
+  # pdf:
+  #   geometry:
+  #     - top=20mm
+  #     - left=20mm
+  #     - right=20mm
+  #     - bottom=30mm
+toc: true
+execute: 
+  echo: false
+  message: false
+  warning: false
+---
+
+```{r setup, include = FALSE}
+library(tidyverse)
+library(knitr)
+library(gridExtra)
+library(tictoc)
+```
+
+```{r}
+# load("pwdists/input/preds_obs_pwdist_input_data_Region5.RData")
+# load("pwdists/input/preds_obs_fish_for_estimation_Region5.RData")
+# load("Region5_results/Region5_est_pred_results.RData")
+# load("Region5_results/nobs_by_species.rda")
+# 
+# # update Nov 14 2025: remove 24 species that are identified only at the genus level
+# results_by_species = results_by_species[!str_detect(tolower(names(results_by_species)), "genus")]
+# results_by_species = results_by_species[!str_detect(tolower(names(results_by_species)), "subspecies")]
+# 
+# q = nrow(preds)
+# n = n_distinct(fish_region5$COMID)
+# # update Nov 14 2025: remove 24 species that are identified only at the genus level
+# nobs_by_species = nobs_by_species[!str_detect(tolower(nobs_by_species$Common_Name), "genus"),]
+# nobs_by_species = nobs_by_species[!str_detect(tolower(nobs_by_species$Common_Name), "subspecies"),]
+# n_species = nrow(nobs_by_species)
+# 
+# # col 1 = COMID, cols 2 through end are the 309 different species observed in Region 5
+# density_by_site_obs = matrix(nrow = n, ncol = n_species+1)
+# density_by_site_obs[,1] = preds$COMID[1:n]
+# 
+# density_by_site_pred = matrix(nrow = n, ncol = n_species+1)
+# density_by_site_pred[,1] = preds$COMID[1:n]
+# 
+# total_counts = data.frame(
+#   # species name
+#   species = nobs_by_species$Common_Name,
+#   # number of COMIDs on which this species was observed
+#   nCOMIDs = nobs_by_species$nCOMIDs,
+#   # proportion of COMIDs on which any fish was observed on which
+#   # *THIS* species was observed
+#   p_COMIDs_with_obs = nobs_by_species$nCOMIDs/n,
+#   # total observed count
+#   obs_total_count = nobs_by_species$TotalCount,
+#   # total predicted count on COMIDs where *any fish* were observed
+#   pred_total_count_wherefishobs = NA,
+#   # total predicted count on COMIDs where *this species* was observed
+#   pred_total_count_wherethisspecobs = NA,
+#   # total predicted Region 5 population size
+#   # (sum of 10*DensityPer100m*LENGTHKM over COMIDs with nonnegative predicted densities)
+#   regional_estimate = NA,
+#   # proportion of predicted densities that are <= -1
+#   # total_counts$p_neg[s] = sum(DensityPer100m <= -1)/q
+#   p_neg = NA,
+#   # proportion of predicted densities *on COMIDs with observations of any
+#   # fish species* that are <= -1
+#   # sum(DensityPer100m[1:n] <= -1)/n
+#   p_neg_obs = NA,
+#   # proportion of predicted densities *on COMIDs with observations of any
+#   # fish species* for which (1) predicted density <= -1 *AND* (2) this species
+#   # was not observed
+#   # sum(DensityPer100m[1:n][obs_density==0] < -1)/n
+#   p_neg_obs0 = NA,
+#   # median of the negative predicted densities
+#   # median(DensityPer100m[1:n][DensityPer100m[1:n] < 0])
+#   median_neg = NA,
+#   # median of the positive predicted densities
+#   # median(DensityPer100m[1:n][DensityPer100m[1:n] > 0])
+#   median_pos = NA,
+#   # correlation between predicted and observed density on COMIDs in which
+#   # any fish species was observed
+#   # cor(DensityPer100m[1:n], obs_density)
+#   cor_obs_pred = NA,
+#   # correlation between predicted and observed density on COMIDs in which
+#   # *THIS* fish species was observed
+#   # cor(DensityPer100m[1:n][obs_density > 0], obs_density[obs_density > 0])
+#   cor_obs_pred_nz = NA,
+#   # estimation runtime
+#   estimation_time = NA,
+#   estimation_units = NA,
+#   # prediction runtime
+#   prediction_time = NA,
+#   prediction_units = NA
+# )
+# 
+# params = data.frame(
+#   beta_1 = NA,
+#   beta_2 = NA,
+#   beta_3 = NA,
+#   beta_4 = NA,
+#   beta_5 = NA,
+#   beta_6 = NA,
+#   beta_7 = NA,
+#   beta_8 = NA,
+#   beta_9 = NA,
+#   beta_10 = NA,
+#   theta_1 = NA,
+#   theta_2 = NA,
+#   theta_3 = NA
+# )
+# 
+# tic("diagnostics loop"); for(s in 1:nrow(total_counts)){ #for(s in 1:10){
+#   cat(paste0(s, " "))
+#   species = total_counts$species[s]
+# 
+#   if(!is.na(results_by_species[[s]][1])){
+# 
+#     DensityPer100m = results_by_species[[s]]$preds_supp$DensityPer100m_pred
+#     CountReachTotal = results_by_species[[s]]$preds_supp$CountReachTotal_pred
+#     obs_density = results_by_species[[s]]$preds_supp$obs_density
+# 
+#     # predicted total count
+#     total_counts$pred_total_count_wherefishobs[s] = sum(CountReachTotal[1:n][CountReachTotal[1:n] >=0])
+#     total_counts$pred_total_count_wherethisspecobs[s] = sum(CountReachTotal[1:n][CountReachTotal[1:n] >=0 & obs_density[1:n] > 0])
+#     total_counts$regional_estimate[s] = sum(CountReachTotal[CountReachTotal >=0])
+#     total_counts$p_neg[s] = sum(DensityPer100m <= -1)/q
+#     total_counts$p_neg_obs[s] = sum(DensityPer100m[1:n] <= -1)/n
+#     total_counts$p_neg_obs0[s] = sum(DensityPer100m[1:n][obs_density[1:n]==0] < -1)/n
+#     total_counts$median_neg[s] = median(DensityPer100m[1:n][DensityPer100m[1:n] < 0])
+#     total_counts$median_pos[s] = median(DensityPer100m[1:n][DensityPer100m[1:n] > 0])
+#     total_counts$cor_obs_pred[s] = cor(DensityPer100m[1:n], obs_density[1:n])
+#     total_counts$cor_obs_pred_nz[s] = cor(DensityPer100m[1:n][obs_density[1:n] > 0],
+#                                           obs_density[1:n][obs_density[1:n] > 0])
+#     # ensure all estimation and predictions times have the same units
+#     units(results_by_species[[s]]$estimation_time) = "secs"
+#     units(results_by_species[[s]]$prediction_time) = "secs"
+#     total_counts$estimation_time[s] = results_by_species[[s]]$estimation_time
+#     total_counts$prediction_time[s] = results_by_species[[s]]$prediction_time
+#     total_counts$prediction_units[s] = "secs"
+#     total_counts$estimation_units[s] = "secs"
+#     params[s,] = c(results_by_species[[s]]$estimation$Beta, results_by_species[[s]]$estimation$Theta)
+# 
+#     density_by_site_pred[, s+1] = DensityPer100m[1:n]
+#     density_by_site_obs[, s+1] = obs_density[1:n]
+#   }
+# }; cat("\n"); toc()
+# # diagnostics loop: 55.643 sec elapsed
+# 
+# diagnostics = cbind(total_counts, params) %>%
+#   dplyr::rename(
+#     Intercept = beta_1,
+#     Elevation = beta_2,
+#     Water_Area = beta_3,
+#     Ann_Runoff = beta_4,
+#     Baseflow = beta_5,
+#     Ann_Temp = beta_6,
+#     Development = beta_7,
+#     Agriculture = beta_8,
+#     Hydro_Alter = beta_9,
+#     Fldplain_Dis = beta_10,
+#     SigmaSq = theta_1,
+#     TauSq = theta_2,
+#     Phi = theta_3
+#   )
+# 
+# cor_density_by_site = rep(NA, n)
+# for(i in 1:n){
+#   cor_density_by_site[i] = cor(density_by_site_obs[i,2:(n_species+1)],
+#                                density_by_site_pred[i,2:(n_species+1)])
+# }
+# 
+# save(diagnostics, cor_density_by_site,
+#      file = "Region5_diagnostics.RData")
+```
+
+```{r}
+load("Region5_diagnostics.RData.RData")
+n_species = nrow(diagnostics)
+plot_dir = "Region5_results/"
+```
+
+:::{.callout-note collapse="true"}
+## More about the data sources
+
+All of this data is available online; we'll provide sources in the paper.
+
+- [elevation and basin area](https://www.sciencebase.gov/catalog/item/57976a0ce4b021cadec97890)
+- [development and agriculture](https://www.sciencebase.gov/catalog/item/5d66b3b6e4b0c4f70cefb11d)
+- [annual runoff](https://www.sciencebase.gov/catalog/item/578f8ad8e4b0ad6235cf6e43)
+- [baseflow](https://www.sciencebase.gov/catalog/item/5669a8e3e4b08895842a1d4f)
+- [temperature](https://www.sciencebase.gov/catalog/item/566ef828e4b09cfe53ca76f7)
+- [hydrological alteration](https://www.nature.com/articles/s41597-022-01566-1)
+- [floodplain integrity](https://www.nature.com/articles/s43247-023-00877-4)
+
+Citation for most of the data: Wieczorek, M.E., Jackson, S.E., and Schwarz, G.E., 2018, Select Attributes for NHDPlus Version 2.1 Reach Catchments and Modified Network Routed Upstream Watersheds for the Conterminous United States (ver. 4.0, August 2023): U.S. Geological Survey data release, https://doi.org/10.5066/F7765D7V.
+:::
+
+
+## Runtime
+
+```{r}
+#| label: fig-runtimes
+#| fig-cap: "Computational expense for estimating and predicting."
+#| fig-subcap: 
+#|   - "Runtime for estimating model parameters"
+#|   - "Runtime for predicting fish densities across Region 5"
+#| layout: "[45,-10,45]"
+
+ggplot(diagnostics, aes(x = estimation_time)) + 
+  geom_histogram(bins = 20) +
+  xlab("Estimation time (seconds)") +
+  ylab("Count") +
+  theme_bw()
+
+ggsave(filename = paste0(plot_dir, "est_time.png"),
+       width = 3, height = 3, units = "in")
+
+ggplot(diagnostics, aes(x = prediction_time)) + 
+  geom_histogram(bins = 20) +
+  xlab("Prediction time (seconds)") +
+  ylab("Count") +
+  theme_bw()
+
+ggsave(filename = paste0(plot_dir, "pred_time.png"),
+       width = 3, height = 3, units = "in")
+
+# est_time = ggplot(diagnostics, aes(x = estimation_time)) + 
+#   geom_histogram(bins = 20) +
+#   xlab("Estimation time (seconds)") +
+#   theme_bw()
+# 
+# pred_time = ggplot(diagnostics, aes(x = prediction_time)) + 
+#   geom_histogram(bins = 20) +
+#   xlab("Prediction time (seconds)") +
+#   theme_bw()
+# 
+# both = grid.arrange(est_time, pred_time, nrow = 1)
+# 
+# ggsave(both, filename = paste0(plot_dir, "est_pred_times.png"),
+#        width = 8, height = 3, units = "in")
+```
+
+@fig-runtimes shows the distribution of estimation and prediction runtimes across species. On average, estimation and prediction for a given species took `r round(mean(diagnostics$estimation_time), 2)` seconds and `r round(mean(diagnostics$prediction_time), 2)` seconds, respectively. Total estimation and prediction time across all 309 species was `r round((sum(diagnostics$prediction_time) + sum(diagnostics$estimation_time))/3600, 2)` hours.
+
+## Number of observations per species
+
+@fig-npCOMIDs shows the number and proportion of COMIDs with any fish observations that have observations of each species.
+
+The number of COMIDs with observations of each species ranges from `r min(diagnostics$nCOMIDs)` to `r max(diagnostics$nCOMIDs)` (mean `r round(mean(diagnostics$nCOMIDs), 1)`; quartiles `r quantile(diagnostics$nCOMIDs, 0.25)`, `r quantile(diagnostics$nCOMIDs, 0.5)`, `r quantile(diagnostics$nCOMIDs, 0.75)`).
+
+The proportion of COMIDs with observations of at least one species that have observations of a given species ranges from `r format(round(min(diagnostics$p_COMIDs_with_obs), 4), scientific=FALSE)` to `r format(round(max(diagnostics$p_COMIDs_with_obs), 4), scientific=FALSE)` (mean `r format(round(mean(diagnostics$p_COMIDs_with_obs), 4), scientific=FALSE)`; quartiles `r format(round(quantile(diagnostics$p_COMIDs_with_obs, 0.25), 4), scientific=FALSE)`, `r format(round(quantile(diagnostics$p_COMIDs_with_obs, 0.5), 4), scientific=FALSE)`, `r format(round(quantile(diagnostics$p_COMIDs_with_obs, 0.75), 4), scientific=FALSE)`).
+
+```{r}
+#| label: fig-npCOMIDs
+#| fig-cap: "Number and proportion of COMIDs with observations of each species."
+#| fig-subcap: 
+#|   - "Number of COMIDs with observations of each species"
+#|   - "Proportion of COMIDs with any fish observations that have observations of each species"
+#| layout: "[45,-10,45]"
+
+ggplot(diagnostics, aes(x = nCOMIDs)) + 
+  geom_histogram(bins = 20) +
+  xlab("Number of COMIDs on which this species was observed") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = p_COMIDs_with_obs)) +
+  geom_histogram(bins = 20) +
+  xlab("Proportion") +
+  theme_bw()
+```
+
+
+## Diagnostics
+
+### Total observed versus predicted fish counts
+
+@fig-total-counts-histograms shows the distribution of observed and predicted counts across species, and @fig-total-counts-scatterplots shows scatterplots of observed versus predicted counts. I show three possible predicted counts: 
+
+a. totals across only Region 5 COMIDs at which the species in question was observed,
+b. totals across only Region 5 COMIDs at which any fish were observed, and
+c. regional estimates (totals across all Region 5 COMIDs).
+
+The ratio of predicted to observed counts range from `r round(min(diagnostics$pred_total_count_wherethisspecobs/diagnostics$obs_total_count), 2)` to `r round(max(diagnostics$pred_total_count_wherethisspecobs/diagnostics$obs_total_count), 2)` at COMIDs where the species in questions was observed, from `r round(min(diagnostics$pred_total_count_wherefishobs/diagnostics$obs_total_count), 2)` to `r round(max(diagnostics$pred_total_count_wherefishobs/diagnostics$obs_total_count), 2)` at COMIDs where any fish were observed, and from `r round(min(diagnostics$regional_estimate/diagnostics$obs_total_count), 2)` to `r round(max(diagnostics$regional_estimate/diagnostics$obs_total_count), 2)` using the regional estimates as the predicted counts.
+
+```{r}
+#| label: fig-total-counts-histograms
+#| fig-cap: "Observed and predicted total counts across Region 5."
+#| fig-subcap: 
+#|   - "Distribution of observed counts"
+#|   - "Distribution of predicted counts (over all Region 5 COMIDs at which the species in question was observed)"
+#|   - "Distribution of predicted counts (over all Region 5 COMIDs at which any fish were observed)"
+#|   - "Distribution of regional estimates (over all Region 5 COMIDs)"
+#| layout: "[[45,-10,45],[45,-10,45]]"
+
+ggplot(diagnostics, aes(x = obs_total_count/10^6)) + 
+  geom_histogram(bins = 20) +
+  xlab("Total observed count (millions of fish)") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = pred_total_count_wherethisspecobs/10^6)) + 
+  geom_histogram(bins = 20) +
+  xlab("Total predicted count at COMIDs with obs of this species (millions of fish)") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = pred_total_count_wherefishobs/10^6)) + 
+  geom_histogram(bins = 20) +
+  xlab("Total predicted count at COMIDs with any obs (millions of fish)") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = regional_estimate/10^6)) + 
+  geom_histogram(bins = 20) +
+  xlab("Total predicted count (millions of fish)") +
+  theme_bw()
+```
+
+
+```{r}
+#| label: fig-total-counts-scatterplots
+#| fig-cap: "Observed vs predicted total counts across Region 5."
+#| fig-subcap: 
+#|   - "Observed counts vs predicted counts where the species in question was observed"
+#|   - "Observed counts vs predicted counts where any fish were observed"
+#|   - "Observed counts vs predicted regional estimates"
+#| layout: "[[45,-10,45],[45,-10,45]]"
+ggplot(diagnostics, aes(x = obs_total_count/10^6, y = pred_total_count_wherethisspecobs/10^6)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  xlab("Observed total count (millions of fish)") +
+  ylab("Predicted total count (millions of fish)") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "obs_v_pred_wherethisspec.png"),
+  width = 3, height = 3, units = "in")
+
+ggplot(diagnostics, aes(x = obs_total_count/10^6, y = pred_total_count_wherefishobs/10^6)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  xlab("Observed total count (millions of fish)") +
+  ylab("Predicted total count (millions of fish)") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "obs_v_pred_wherefishobs.png"),
+  width = 3, height = 3, units = "in")
+
+ggplot(diagnostics, aes(x = obs_total_count/10^6, y = regional_estimate/10^6)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  xlab("Observed total count (millions of fish)") +
+  ylab("Predicted total count (millions of fish)") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "obs_v_pred.png"),
+  width = 3, height = 3, units = "in")
+```
+
+### Negative predicted densities
+
+@fig-neg-dens-prop shows the distribution of negative predicted densities. I updated these results to consider densities less than or equal to -1. Of the `r n_species` species, `r sum(diagnostics$p_neg == 0)` (`r round(100*mean(diagnostics$p_neg == 0))`%) have no negative predicted densities. The mean and max proportion of negative predicted densities by species are `r round(mean(diagnostics$p_neg_obs), 4)` and `r round(max(diagnostics$p_neg_obs), 4)`, respectively.
+
+```{r}
+#| label: fig-neg-dens-prop
+#| fig-cap: "Proportions of densities that are negative."
+#| fig-subcap: 
+#|   - "Distribution of the proportion of predicted densities that are less than or equal to -1"
+#|   - "Same as (a), except the denominator is the number of COMIDs with observations of any fish species"
+#|   - "Distribution of the proportion in which the numerator is the number of COMIDs in which this species was not observed and its predicted density is less than or equal to -1, and the denominator is the number of COMIDs with observations of any fish species"
+#| layout: "[[45,-10,45],[45,-10,45]]"
+
+ggplot(diagnostics, aes(x = p_neg)) + 
+  geom_histogram(bins = 20) +
+  xlab("Proportion") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = p_neg_obs)) + 
+  geom_histogram(bins = 20) +
+  xlab("Proportion") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = p_neg_obs0)) + 
+  geom_histogram(bins = 20) +
+  xlab("Proportion") +
+  theme_bw()
+```
+
+```{r}
+#| eval: false
+
+# sum(DensityPer100m <= -1)/q
+summary(diagnostics$p_neg)
+sum(diagnostics$p_neg == 0); mean(diagnostics$p_neg == 0)
+
+# sum(DensityPer100m[1:n] <= -1)/n
+summary(diagnostics$p_neg_obs)
+sum(diagnostics$p_neg_obs == 0); mean(diagnostics$p_neg_obs == 0)
+
+# sum(DensityPer100m[1:n][obs$Count==0] < -1)/n
+summary(diagnostics$p_neg_obs0)
+sum(diagnostics$p_neg_obs0 == 0); mean(diagnostics$p_neg_obs0 == 0)
+```
+
+I also computed the median positive and negative densities by species. @tbl-median-densities summarizes the median positive and negative densities by species, and @fig-neg-dens-medians shows distributions and scatterplots of the median positive and negative densities by species.
+
+```{r}
+#| label: tbl-median-densities
+#| tbl-cap: "Summary of median positive and negative densities by species."
+
+tbl_medians = rbind(summary(diagnostics$median_neg),
+                    summary(diagnostics$median_pos))
+
+rownames(tbl_medians) = c("Negative", "Positive")
+colnames(tbl_medians) = names(summary(diagnostics$median_neg))
+
+kable(tbl_medians, digits = 4)
+```
+
+```{r}
+#| label: fig-neg-dens-medians
+#| fig-cap: "Median positive and negative densities by species."
+#| fig-subcap: 
+#|   - "Distribution of the median negative density"
+#|   - "Distribution of the median positive density"
+#|   - "Distribution of the ratio of median negative density to median positive density"
+#|   - "Median negative density vs median positive density"
+#| layout: "[[45,-10,45],[45,-10,45]]"
+
+ggplot(diagnostics, aes(x = median_neg)) + 
+  geom_histogram(bins = 20) +
+  xlab("Median negative density") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = median_pos)) + 
+  geom_histogram(bins = 20) +
+  xlab("Median positive density") +
+  theme_bw()
+
+ggplot(diagnostics, aes(x = median_neg/median_pos)) + 
+  geom_histogram(bins = 20) +
+  labs(x = "Ratio", y = "Count") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "median_neg_pos_density_ratio.png"),
+  width = 3, height = 3, units = "in")
+
+ggplot(diagnostics, aes(y = median_neg, x = median_pos)) + 
+  geom_point() +
+  ylab("Median negative density") +
+  xlab("Median positive density") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "median_neg_vs_pos_density.png"),
+  width = 3, height = 3, units = "in")
+```
+
+
+### Correlations by species
+
+@tbl-cor-by-species and @fig-cor-by-species show the correlations between predicted and observed densities across all sites for each species. These correlations use the predicted densities without any modification, i.e. with negative predicted densities included.
+
+```{r}
+#| label: tbl-cor-by-species
+#| tbl-cap: "Correlations by species."
+
+tbl_cor_by_spec = data.frame(matrix(summary(diagnostics$cor_obs_pred), nrow=1))
+names(tbl_cor_by_spec) = names(summary(diagnostics$cor_obs_pred))
+
+sd(tbl_cor_by_spec)
+
+kable(tbl_cor_by_spec, digits = 3)
+```
+
+```{r}
+#| label: fig-cor-by-species
+#| fig-cap: "Correlations between observed and predicted fish densities by species across Region 5."
+#| fig-subcap: 
+#|   - "Correlations by species across all of Region 5"
+#|   - "Correlations by species only for COMIDs at which this species was observed"
+#| layout: "[45,-10,45]"
+
+ggplot(diagnostics, aes(x = cor_obs_pred)) + 
+  geom_histogram(aes(y = after_stat(count/sum(count))), bins = 20) +
+  labs(x = "Correlation", y = "Proportion of species") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "cor_by_species.png"),
+  width = 3, height = 3, units = "in")
+
+ggplot(diagnostics, aes(x = cor_obs_pred_nz)) + 
+  geom_histogram(bins = 20)
+```
+
+### Correlations by site
+
+@tbl-cor-by-site and @fig-cor-by-site show the correlations between predicted and observed densities for all species at each site.
+
+```{r}
+#| label: tbl-cor-by-site
+#| tbl-cap: "Correlations by sites."
+
+tbl_cor_by_site = data.frame(matrix(summary(cor_density_by_site), nrow=1))
+names(tbl_cor_by_site) = names(summary(cor_density_by_site))
+
+sd(cor_density_by_site)
+
+kable(tbl_cor_by_site, digits = 3)
+```
+
+```{r}
+#| label: fig-cor-by-site
+#| fig-cap: "Correlations between observed and predicted fish densities by site across all species."
+#| fig-width: 4
+#| fig-height: 2
+
+ggplot(data.frame(cor_density_by_site), aes(cor_density_by_site)) + 
+  geom_histogram(aes(y = after_stat(count/sum(count))), bins = 20) +
+  labs(x = "Correlation", y = "Proportion of sites") +
+  theme_bw()
+  
+ggsave(filename = paste0(plot_dir, "cor_by_site.png"),
+  width = 3, height = 3, units = "in")
+```
+
+
