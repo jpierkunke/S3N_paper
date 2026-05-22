@@ -8,8 +8,6 @@
 
 nneighbors=10
 
-if [ ! -z $SLURM_JOB_NAME ]; then module load R-bundle-CRAN; echo "module loaded"; else echo "module not loaded"; fi
-
-Rscript code/all_obsobs.R $nneighbors &> R_outfiles/all_obsobs_$nneighbors.Rout
+Rscript code/all_obsobs.R $nneighbors
 
 

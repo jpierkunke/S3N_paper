@@ -18,7 +18,9 @@ for SLURM_ARRAY_TASK_ID in `seq 1 $num_batches`; do
       sleep 1
       njobs=`jobs | wc -l`
     done
-    bash ./scripts/all_predsobs.sh "$@" &
-
+    if [ ! -z $SLURM_JOB_NAME ]  # if SLURM_JOB_NAME is defined (i.e. in a slurm environment)
+    	then sbatch --array=[$SLURM_ARRAY_TASK_ID] scripts/all_predsobs.sh "$@"
+	else bash ./scripts/all_predsobs.sh "$@" &
+	fi
     done
 wait

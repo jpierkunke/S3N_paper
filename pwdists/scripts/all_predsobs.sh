@@ -5,7 +5,7 @@
 #SBATCH --mem 20G
 #SBATCH --nodes 1
 #SBATCH --output std_outfiles/all_predsobs_%2a.out
-#SBATCH --array 1-34
+#SBATCH --array 1-34 # note: currently this is overwritten by both cluster and local scripts
 
 batch_id=$SLURM_ARRAY_TASK_ID
 batch_id_padded=`printf "%02d" $batch_id`
@@ -17,8 +17,8 @@ echo batch_id $batch_id of $num_batches batches
 echo batch_size $batch_size
 echo $nneighbors neighbors per pred point
 
-if [ ! -z $SLURM_JOB_NAME ]; then module load R-bundle-CRAN; echo "module loaded"; else echo "module not loaded"; fi
+# if [ ! -z $SLURM_JOB_NAME ]; then module load R-bundle-CRAN; echo "module loaded"; else echo "module not loaded"; fi
 
-Rscript code/all_predsobs.R $batch_id $batch_size $nneighbors &> R_outfiles/all_predsobs_$batch_id_padded.Rout
+Rscript code/all_predsobs.R $batch_id $batch_size $nneighbors # &> R_outfiles/all_predsobs_$batch_id_padded.Rout
 
 echo batch_id $batch_id finished

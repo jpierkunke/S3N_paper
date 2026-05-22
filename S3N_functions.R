@@ -1,6 +1,5 @@
 # Functions for S3N models and analysis
-# PhD dissertation, Chapters 3-4
-# Jess Kunke, 2025 April
+# Jess Kunke, last updated 2026 April
 
 # Environmental covariate preprocessing -----------------------------------
 
@@ -513,7 +512,7 @@ read_preds_data = function(streams, pred_path, pred_filename){
     left_join(
       select(st_drop_geometry(streams), -rowID),
       by = "COMID"
-      )
+    )
   
   if(!identical(preds1, preds[,1:ncol(preds1)])){
     cat("Warning in read_preds_data(): double-check the preds-streams join.", fill = TRUE)
@@ -528,9 +527,16 @@ read_preds_data = function(streams, pred_path, pred_filename){
 join_fish_to_preds = function(fish, preds){
   cat(paste0("Joining fish data to preds... "), fill=TRUE)
   # join the preds data to use preds XY coords instead of the X,Y in fishscales
-  fish = left_join(fish, preds, by="COMID") %>%
-    # make an sf class object
-    st_sf()
+  if("networkID" %in% names(fish)){
+    fish = left_join(fish, preds) %>%
+      # make an sf class object
+      st_sf()
+  }else{
+    fish = left_join(fish, preds, by="COMID") %>%
+      # make an sf class object
+      st_sf()
+  }
+  
   return(fish)
 }
 
@@ -648,7 +654,7 @@ prep_to_compute_pwdist_region5 = function(streams, fish, pred_path, out_dir,
   cat("Reading in regional prediction points data...", fill=TRUE)
   tic("Read in regional prediction points data")
   preds = read_preds_data(streams, pred_path, pred_filename = pred_filename)
-    
+  
   toc()
   
   # make sure the preds and obs represent only one connected component
@@ -745,6 +751,63 @@ prep_to_compute_pwdist = function(streams, obs, out_dir,
   cat("Writing obs, preds, streams to file preds_obs_pwdist_input_data.RData for computing pairwise distances...", fill=TRUE)
   tic("Writing obs, preds, streams to file")
   save(streams, preds, obs, file = paste0(out_dir, "preds_obs_pwdist_input_data.RData"))
+  toc()
+  
+  cat("Done.", fill=TRUE)
+}
+
+prep_to_compute_pwdist_rep = function(streams, obs, nw, nobs, rep, out_dir,
+                                      pred_filename = "PredictionPoints_MS05_NSI"){
+  
+  # inherit envir covariates, binary IDs, upstream distances, and weights
+  # from streams to preds
+  cat("Reading in regional prediction points data...", fill=TRUE)
+  tic("Read in regional prediction points data")
+  preds = read_preds_data(streams, pred_path, pred_filename = pred_filename)
+  toc()
+  
+  # make sure the preds and obs represent only one connected component
+  cat("Checking that prediction points layer has only one network component...", fill=TRUE)
+  if (n_distinct(preds$networkID) != 1) {
+    stop("Observation, prediction, and stream data must come from a single connected river network component.")
+  }else{
+    cat("Yes", fill = TRUE)
+  }
+  
+  # compute point upstream distances
+  cat("Updating upstream distances to add the distance from downstream node to point...", fill=TRUE)
+  tic("Compute prediction site/point upstream distances")
+  preds = calculate_point_upstream_distance(preds, streams)
+  toc() # prediction site/point upstream distances: 5.08 sec elapsed
+  
+  cat("Reordering preds so that first n rows are the fish COMIDs...", fill = TRUE)
+  
+  obs = obs %>%
+    st_drop_geometry() %>%
+    join_fish_to_preds(preds) %>%
+    select(COMID, networkID, binaryID, up_dist, log_AFV) %>%
+    unique()
+  obs$ptID = 1:nrow(obs)
+  obs = relocate(obs, ptID)
+  
+  preds = preds %>%
+    left_join(select(st_drop_geometry(obs), COMID, ptID)) %>%
+    arrange(ptID) %>%
+    select(COMID, networkID, binaryID, up_dist, log_AFV, ptID)
+  preds$ptID[(nrow(obs)+1):nrow(preds)] = (nrow(obs)+1):nrow(preds)
+  preds = relocate(preds, ptID)
+  
+  streams = streams %>%
+    left_join(select(st_drop_geometry(preds), COMID, ptID), by="COMID") %>%
+    relocate(ptID) %>%
+    arrange(ptID)
+  
+  outfn = paste0(out_dir, "pwdist_input_nw", nw, "_nobs", nobs, "_rep", rep, ".RData")
+  
+  cat("Writing obs, preds, streams to file for computing pairwise distances...", fill=TRUE)
+  cat(paste0("File name: ", outfn))
+  tic("Writing obs, preds, streams to file")
+  save(streams, preds, obs, file = outfn)
   toc()
   
   cat("Done.", fill=TRUE)
@@ -961,7 +1024,7 @@ compute_pwdists_pred_obs = function(preds, obs, streams, m, out_dir,
     
     neighbors = list(nnIndx = nnIndx, nnDist = nnDist, nnWght = nnWght)
     
-    obs_neighbors = add_D_neighbor_vars(neighbors, obsobs_dist, obsobs_wt)
+    obs_neighbors = add_D_neighbor_vars(m, neighbors, obsobs_dist, obsobs_wt)
     
     # save to file these neighbor variables
     cat("Saving neighbor variables to file...", fill = TRUE)
@@ -1019,6 +1082,258 @@ compute_pwdists_pred_obs = function(preds, obs, streams, m, out_dir,
   }
 }
 
+compute_pwdists_pred_obs_rep = function(preds, obs, streams, m, 
+                                        nw, nobs, rep, out_dir, 
+                                        obs_only = FALSE, out_file_suffix = NULL) {
+  
+  if(!obs_only & is.null(out_file_suffix)){
+    stop("When obs_only = FALSE, must provide out_file_suffix in case of multiple batches.")
+  }
+  
+  # make sure the preds and obs represent only one connected component
+  if (n_distinct(preds$networkID) != 1 | n_distinct(obs$networkID) != 1) {
+    if(obs_only){
+      stop("Observation locations must come from a single connected river network component.")
+    } else {
+      stop("Prediction and observation locations must come from a single connected river network component.")
+    }
+  }
+  
+  preds_info = preds %>%
+    st_drop_geometry() %>%
+    select(ptID, COMID, binaryID, up_dist, log_AFV) %>%
+    # we only need the unique point locations
+    unique()
+  
+  obs_info = obs %>%
+    st_drop_geometry() %>%
+    select(ptID, COMID, binaryID, up_dist, log_AFV) %>%
+    # we only need the unique point locations
+    unique()
+  
+  # initialize a matrix of fish_pairs
+  # one row for each combination of a prediction location and an observation location
+  # number of rows = number of preds x number of obs
+  # fish_pairs = matrix(nrow=nrow(preds)*nrow(obs), ncol=2)
+  # fish_pairs = expand_grid(ind_pred = 1:nrow(preds), ind_obs = 1:nrow(obs))
+  fish_pairs = expand_grid(ind_pred = preds_info$ptID, ind_obs = obs_info$ptID)
+  # fish_pairs$pred_binID = rep(preds$binaryID, each = nrow(obs))
+  # fish_pairs$obs_binID = rep(obs$binaryID, times = nrow(preds))
+  fish_pairs$COMID_pred = rep(preds$COMID, each = nrow(obs))
+  fish_pairs$COMID_obs = rep(obs$COMID, times = nrow(preds))
+  fish_pairs = filter(fish_pairs, ind_pred > ind_obs)
+  # if p = # pred points in this batch and n = # obs points in this batch,
+  # at this point there should be n*(n-1)/2 obs-obs pairs and n*(p-n) pred-obs pairs
+  # so number of rows should equal n*(n-1)/2 + n*(p-n)
+  
+  # join binIDs and up_dist
+  cat("Joining binary IDs and upstream distances...", fill = TRUE)
+  tic("Joining binary IDs and upstream distances")
+  fish_pairs = as.data.frame(fish_pairs) %>%
+    # add the binary IDs and upstream distances for each COMID in each pair
+    left_join(preds_info, by = join_by(COMID_pred == COMID)) %>%
+    rename(binID_pred = binaryID, updist_pred = up_dist, logAFV_pred = log_AFV) %>%
+    # filter(networkID %in% c(454080,  465220)) %>%
+    left_join(obs_info, by = join_by(COMID_obs == COMID)) %>%
+    rename(binID_obs = binaryID, updist_obs = up_dist, logAFV_obs = log_AFV)
+  toc()
+  
+  # compute nearest common junctions
+  cat("Computing nearest common junctions...", fill = TRUE)
+  tic("Computing nearest common junctions")
+  fish_pairs$binID_ncj = mapply(nearest_common_junction, 
+                                fish_pairs$binID_pred, fish_pairs$binID_obs)
+  toc()
+  
+  # compute pairwise distances
+  cat("Computing pairwise distances...", fill = TRUE)
+  tic("Computing pairwise distances")
+  fish_pairs = fish_pairs %>%
+    # determine flow connected (FC) or flow unconnected (used in computing distance)
+    # FC if the NCJ of points 1 and 2 is one of those two points themselves
+    mutate(FC = ((binID_ncj == binID_pred) | (binID_ncj == binID_obs))) %>%
+    # get the upstream distance of the NCJ
+    # we need to use streams instead of fish obs because the COMID of the NCJ of
+    # two observation points may not be represented in the obs data frame
+    left_join(select(st_drop_geometry(streams), binaryID, up_dist, LENGTHKM),
+              by = join_by(binID_ncj == binaryID)) %>%
+    rename(updist_ncj = up_dist, ncj_length = LENGTHKM) %>%
+    # compute each distance
+    mutate(pair_dist = ifelse(FC,
+                              abs(updist_pred - updist_obs),
+                              updist_pred + updist_obs - 2*(updist_ncj+ncj_length))) %>%
+    # the upstream AFV is the smaller of the two AFVs (need this to compute weights)
+    mutate(logAFVup = pmin(logAFV_pred, logAFV_obs), logAFVdn = pmax(logAFV_pred, logAFV_obs)) %>%
+    select(ind_pred, ind_obs, pair_dist, FC, logAFVup, logAFVdn)
+  toc()
+  
+  # compute spatial weights
+  # weight pi_{ij} = sqrt(AFVj/AFVi) if i,j FC and j upstream,
+  #                  sqrt(AFVi/AFVj) if i,j FC and i upstream,
+  #                  0 otherwise
+  cat("Computing spatial weights...", fill = TRUE)
+  fish_pairs$weight = 0
+  fish_pairs$weight[fish_pairs$FC] = sqrt(exp(fish_pairs$logAFVup[fish_pairs$FC] - fish_pairs$logAFVdn[fish_pairs$FC]))
+  fish_pairs = select(fish_pairs, ind_pred, ind_obs, pair_dist, weight, FC)
+  
+  # compute neighbor vars nnIndx, d, and weights
+  cat("Computing neighbor variables nnIndx, nnDist, and nnWght", fill = TRUE)
+  
+  # identify nearest neighbors, prioritizing FC points for tail-up covariance
+  fish_mat = fish_pairs %>%
+    # within the group of rows for a given pred_point,
+    # - put the FC points first, followed by the not-FC points
+    # - then within FC and not-FC for each pred_point,
+    #   sort in order of increasing pairwise distance
+    # this ensures that FC points are picked first, and
+    # not-FC points are chosen only if # FC points < m
+    arrange(ind_pred, desc(FC), pair_dist) %>%
+    group_by(ind_pred) %>%
+    slice_head(n = m)
+  
+  # there are m neighbors for every pred point
+  # (whereas there are only i-1 many neighbors for obs points i <= m)
+  if(obs_only){ # obs-obs pairs
+    
+    fish_mat$obs_rank = c(
+      get_nnIndx(1, m) + 1,
+      rep(1:m, times = (n_distinct(fish_mat$ind_pred)-m))
+    )
+    
+  } else { # preds-obs pairs
+    
+    fish_mat$obs_rank = c(
+      rep(1:m, times = n_distinct(fish_mat$ind_pred))
+    )
+    
+  }
+  
+  nnIndx = fish_mat %>%
+    select(-pair_dist, -FC, -weight) %>%
+    pivot_wider(
+      names_from = obs_rank,
+      values_from = ind_obs
+    ) %>% 
+    ungroup() %>%
+    select(-ind_pred) %>%
+    as.matrix() %>%
+    labelled::remove_attributes("dimnames") %>%
+    t() %>%
+    matrix(, nrow=1)
+  # remove NAs and change to 0-indexing
+  nnIndx = nnIndx[!is.na(nnIndx)] - 1
+  
+  nnDist = fish_mat %>%
+    select(-ind_obs, -FC, -weight) %>%
+    pivot_wider(
+      names_from = obs_rank,
+      values_from = pair_dist
+    ) %>% 
+    ungroup() %>%
+    select(-ind_pred) %>%
+    as.matrix() %>%
+    labelled::remove_attributes("dimnames") %>%
+    t() %>%
+    matrix(, nrow=1)
+  nnDist = nnDist[!is.na(nnDist)]
+  
+  nnWght = fish_mat %>%
+    select(-ind_obs, -FC, -pair_dist) %>%
+    pivot_wider(
+      names_from = obs_rank,
+      values_from = weight
+    ) %>% 
+    ungroup() %>%
+    select(-ind_pred) %>%
+    as.matrix() %>%
+    labelled::remove_attributes("dimnames") %>%
+    t() %>%
+    matrix(, nrow=1)
+  nnWght = nnWght[!is.na(nnWght)]
+  
+  if(obs_only){ # for obs-obs distances
+    
+    n = nrow(obs)
+    
+    obsobs_dist = as.matrix(sparseMatrix(i = c(fish_pairs$ind_pred, n),
+                                         j = c(fish_pairs$ind_obs, n),
+                                         x = c(fish_pairs$pair_dist, 0)))
+    
+    obsobs_wt = as.matrix(sparseMatrix(i = c(fish_pairs$ind_pred, n),
+                                       j = c(fish_pairs$ind_obs, n),
+                                       x = c(fish_pairs$weight, 0))) + diag(n)
+    
+    rm(fish_pairs, fish_mat)
+    
+    cat("Saving distances and spatial weights to file for use in prediction...", fill = TRUE)
+    # save to file these lookup matrices for obsobs dists and weights
+    save(obsobs_dist, obsobs_wt,
+         file = paste0(pwdist_obsobs_dir, "obsobs_dist_wt_nw", 
+                       nw, "_nobs", nobs, "_rep", rep, ".rda"))
+    
+    neighbors = list(nnIndx = nnIndx, nnDist = nnDist, nnWght = nnWght)
+    
+    obs_neighbors = add_D_neighbor_vars(m, neighbors, obsobs_dist, obsobs_wt)
+    
+    # save to file these neighbor variables
+    cat("Saving neighbor variables to file...", fill = TRUE)
+    save(obs_neighbors, file = paste0(pwdist_obsobs_dir, "obs_neighbors_nw", 
+                                      nw, "_nobs", nobs, "_rep", rep, ".rda"))
+    
+    obsobs_dist = obsobs_dist + t(obsobs_dist)
+    obsobs_wt = obsobs_wt + t(obsobs_wt) - diag(n)
+    
+    nnIndxObs = matrix(as.integer(0), nrow = n, ncol = m)
+    nnDistObs = matrix(0.0, nrow = n, ncol = m)
+    nnWghtObs = matrix(0.0, nrow = n, ncol = m)
+    
+    for(i in 1:n){
+      FC_points = which(obsobs_wt[i,] > 0)
+      FC_points_sorted = FC_points[order(obsobs_dist[i, FC_points])]
+      # prioritize the FC points
+      nnIndxObs[i,] = FC_points_sorted[1:m]
+      
+      # if fewer FC points than m (desired number of nearest neighbors),
+      # then add neighbors to replace the remaining NAs
+      if(length(FC_points) < m){
+        FU_points = which(obsobs_wt[i,] == 0)
+        FU_points_sorted = FU_points[order(obsobs_dist[i, FU_points])]
+        nnIndxObs[i, (length(FC_points) + 1):m] = FU_points_sorted[1:(m-length(FC_points))]
+      }
+      
+      nnDistObs[i,] = obsobs_dist[i,][nnIndxObs[i,]]
+      nnWghtObs[i,] = obsobs_wt[i,][nnIndxObs[i,]]
+    }
+    
+    nnIndxObs = matrix(t(nnIndxObs), nrow=1)
+    nnDistObs = matrix(t(nnDistObs), nrow=1)
+    nnWghtObs = matrix(t(nnWghtObs), nrow=1)
+    
+    rm(obsobs_dist, obsobs_wt)
+    
+    cat("Saving m nearest neighbors for each obs point to file for use in prediction...", fill = TRUE)
+    # save to file these lookup matrices for obsobs dists and weights
+    save(nnIndxObs, nnDistObs, nnWghtObs,
+         file = paste0(out_dir, "obsobs_nns_for_prediction_nw", 
+                       nw, "_nobs", nobs, "_rep", rep, ".rda"))
+    cat("Done.", fill = TRUE)
+    
+  } else { # a batch of pred-obs distances
+    
+    pred_neighbors = list(
+      nnIndx = nnIndx,
+      nnDist = nnDist,
+      nnWght = nnWght
+    )
+    
+    # save to file these neighbor variables
+    cat("Saving neighbor variables to file...", fill = TRUE)
+    save(pred_neighbors, file = paste0(out_dir, "pred_neighbors_", out_file_suffix))
+    cat("Done.", fill = TRUE)
+  }
+}
+
+
 # read and combine all the pred-obs nn data
 combine_preds_nn_results = function(data_dir, out_dir, m, batch_size){
   
@@ -1064,7 +1379,7 @@ combine_preds_nn_results = function(data_dir, out_dir, m, batch_size){
     cat("Saving combined data to file...", fill = TRUE)
     save(pred_neighbors, file = paste0(out_dir, "pred_neighbors.rda"))
     cat("Done.", fill = TRUE)
-  
+    
   }
 }
 
@@ -1090,7 +1405,7 @@ add_obs_nns_for_prediction = function(obs_dir, out_dir, nnIndxObs, nnDistObs, nn
 
 # assumes neighbors already contains nnIndx, nnDist, nnWght
 # computes the other six variables to add to the neighbors object
-add_D_neighbor_vars = function(neighbors, obsobs_dist, obsobs_wt){
+add_D_neighbor_vars = function(m, neighbors, obsobs_dist, obsobs_wt){
   n = nrow(obsobs_dist)
   
   # make nnIndxLU ----------------------------------------------------------- #
@@ -1269,10 +1584,20 @@ get_k = function(nn){
 # then calls benchmark_S3N, then benchmark_SSN
 benchmark_and_validate = function(streams, pred_path, network,
                                   nreps_S3N = 10, nreps_SSN = 10,
-                                  preproc_only = FALSE,
+                                  preproc_only = FALSE, nobs = NULL,
                                   bench_res_dir = "bench_results/", lsn.path = "lsn"){
   
-  message(paste("Starting benchmarking/validation for network", network, "with nreps_S3N", nreps_S3N, "and nreps_SSN", nreps_SSN))
+  if(is.null(nobs)){
+    message(paste(
+      "Starting benchmarking/validation for network", network, 
+      "with", nreps_S3N, " S3N reps and", nreps_SSN, "SSN reps"
+    ))
+  }else{
+    message(paste(
+      "Starting benchmarking/validation for network", network, 
+      "with ", nobs, "observations,", nreps_S3N, " S3N reps, and", nreps_SSN, "SSN reps"
+    ))
+  }
   
   if(preproc_only){
     message("Preprocessing only")
@@ -1283,19 +1608,26 @@ benchmark_and_validate = function(streams, pred_path, network,
   # keep only inputs needed for S3N and/or SSN
   streams = select(streams, COMID, LENGTHKM, TotDASqKM, Elevation)
   preds = generate_benchmark_preds(streams, pred_path)
-  obs = generate_benchmark_obs(preds)
+  obs = generate_benchmark_obs(preds, nobs)
+  # format nobs for filenames
+  nobs_fn = ifelse(is.null(nobs), "Default", as.character(nobs))
   
-  save(streams, preds, obs, file = paste0(bench_res_dir, "network", network, "_initial_data.rda"))
+  save(
+    streams, preds, obs, 
+    file = paste0(bench_res_dir, "network", network, "_nobs", nobs_fn, "_initial_data.rda")
+  )
   rm(streams, preds, obs)
   
-  # run S3N code to simulate responses for estimation (S3N is faster for 
+  # run S3N code to simulate responses for estimation (S3N is faster for
   # computing the pwdists necessary to simulate responses)
   if(!is.na(nreps_S3N)){
-    benchmark_S3N(network, nreps = nreps_S3N, out_dir = bench_res_dir, 
+    benchmark_S3N(network, nobs_fn,
+                  nreps = nreps_S3N, out_dir = bench_res_dir,
                   preproc_only = preproc_only)
   }
   if(!is.na(nreps_SSN)){
-    benchmark_SSN(network, nreps = nreps_SSN, out_dir = bench_res_dir, 
+    benchmark_SSN(network, nobs_fn,
+                  nreps = nreps_SSN, out_dir = bench_res_dir,
                   preproc_only = preproc_only, lsn.path = lsn.path)
   }
   message("benchmark_and_validate is done.")
@@ -1335,9 +1667,12 @@ generate_benchmark_preds = function(streams, pred_path){
   return(preds)
 }
 
-generate_benchmark_obs = function(preds){
-  # make obs locations at about half of the pred points
-  nobs = min(ceiling(nrow(preds)/2), 10000)
+# if nobs is supplied, make that many obs locations regardless of number of reaches
+generate_benchmark_obs = function(preds, nobs = NULL){
+  if(is.null(nobs)){
+    # make obs locations at about half of the pred points
+    nobs = min(ceiling(nrow(preds)/2), 10000)
+  }
   set.seed(100) # always pick the same points
   preds_sample = sample(preds$COMID, nobs)
   obs = data.frame(COMID = preds_sample)
@@ -1351,35 +1686,247 @@ identify_ndigits = function(nreps){
   return(ceiling(log(nreps+0.1, base = 10)))
 }
 
-benchmark_S3N = function(network, nreps, out_dir, preproc_only){
+benchmark_S3N = function(network, nobs, nreps, out_dir, preproc_only){
   ndigits = identify_ndigits(nreps)
   for(rep in 1:nreps){
-    message(paste("Network", network, "S3N benchmark rep", rep, "of", nreps))
+    message(paste("S3N Network", network, ", ", nobs, "obs points, benchmark rep", rep, "of", nreps))
     print(paste("out_dir:", out_dir))
-    S3N_preproc_and_estimation(network, 
+    S3N_preproc_and_estimation(network, nobs,
                                str_pad(rep, ndigits, side = "left", pad = "0"),
                                out_dir,
                                preproc_only)
   }
 }
 
-benchmark_SSN = function(network, nreps, out_dir, preproc_only, lsn.path){
+benchmark_SSN = function(network, nobs, nreps, out_dir, preproc_only, lsn.path){
   ndigits = identify_ndigits(nreps)
   for(rep in 1:nreps){
-    message(paste("Network", network, "SSN benchmark rep", rep, "of", nreps))
+    message(paste("SSN Network", network, ", ", nobs, "obs points, benchmark rep", rep, "of", nreps))
     print(paste("out_dir:", out_dir))
-    SSN_preproc_and_estimation(network, 
+    SSN_preproc_and_estimation(network, nobs,
                                str_pad(rep, ndigits, side = "left", pad = "0"),
                                out_dir, preproc_only, lsn.path)
   }
 }
 
-S3N_preproc_and_estimation = function(network, rep, out_dir, preproc_only = FALSE){
+benchmark_S3N_one_rep = function(nw, nobs, rep, nreps, out_dir){
+  ndigits = identify_ndigits(nreps)
+  rep = str_pad(rep, ndigits, side = "left", pad = "0")
   
   runtimes = rep(NA, 5)
   
-  print(paste("Loading", paste0(out_dir, "network", network, "_initial_data.rda")))
-  load(paste0(out_dir, "network", network, "_initial_data.rda"))
+  input_fn = paste0(out_dir, "network", nw, "_nobs", nobs, "_initial_data.rda")
+  print(paste("Loading input data file", input_fn))
+  load(input_fn)
+  
+  # configure the stream network
+  tic("Build LSN"); start_time = Sys.time()
+  streams_res = configure_stream_network(streams)
+  streams = streams_res$streams
+  stream_graphs = streams_res$sg
+  toc(); stop_time = Sys.time()
+  runtimes[1] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  # add stream updist vars
+  tic("Stream updist and AFV"); start_time = Sys.time()
+  streams = compute_stream_updist_vars(streams, stream_graphs)
+  toc(); stop_time = Sys.time()
+  runtimes[2] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  # add obs to LSN, compute updist and AFV
+  tic("Add obs to LSN"); start_time = Sys.time()
+  prep_to_compute_pwdist_rep(streams, obs, nw, nobs, rep, pwdist_input_dir)
+  toc(); stop_time = Sys.time()
+  runtimes[3] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  # load the results so that updated obs, preds, streams are written to file
+  load(paste0(pwdist_input_dir, "pwdist_input_nw", nw, "_nobs", nobs, "_rep", rep, ".RData"))
+  
+  tic("Obs-obs distances"); start_time = Sys.time()
+  compute_pwdists_pred_obs_rep(obs, obs, streams, 10, nw, nobs, rep,
+                               pwdist_obsobs_dir, obs_only = TRUE)
+  toc(); stop_time = Sys.time()
+  runtimes[4] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  load(paste0(pwdist_obsobs_dir, "obsobs_dist_wt_nw", nw, "_nobs", nobs, "_rep", rep, ".rda"))
+  
+  preds = left_join(
+    preds,
+    streams %>%
+      st_drop_geometry() %>%
+      data.frame() %>%
+      select(ptID, Elevation),
+    by="ptID"
+  )
+  
+  obs$Elevation = preds$Elevation[1:nrow(obs)]
+  
+  X = obs %>%
+    st_drop_geometry() %>%
+    data.frame() %>%
+    mutate(Intercept = 1) %>%
+    select(Intercept, Elevation) %>%
+    as.matrix()
+  
+  obs$DensityPer100m = simulate_SSN_data(obsobs_dist, obsobs_wt, X)
+  
+  load(paste0(pwdist_obsobs_dir, "obs_neighbors_nw", nw, "_nobs", nobs, "_rep", rep, ".rda"))
+  
+  tic("Estimation"); start_time = Sys.time()
+  estimation = BRISC_estimation_stream(
+    coords = as.matrix(1:nrow(obs)),
+    y = as.matrix(obs$DensityPer100m),
+    x = X,
+    neighbor = obs_neighbors,
+    cov.model = "exponential",
+    nugget_status = 1,
+    verbose = TRUE
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[5] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  params = c(
+    estimation$Beta, # beta (intercept, elevation)
+    estimation$Theta # sigma.sq, tau.sq, phi
+  )
+  params[5] = 1/params[5] # convert phi to lambda (range parameter)
+  names(params)[5] = "lambda"
+  
+  save(params, runtimes,
+       file = paste0(out_dir, "S3N_results_network", nw, "_nobs", nobs, "_rep", rep, ".rda"))
+  
+  save(streams, obs, preds,
+       file = paste0(out_dir, "simobs_network", nw, "_nobs", nobs, "_rep", rep, ".rda"))
+}
+
+benchmark_SSN_one_rep = function(nw, nobs, rep, nreps, out_dir, lsn.path){
+  ndigits = identify_ndigits(nreps)
+  rep = str_pad(rep, ndigits, side = "left", pad = "0")
+  
+  # loads the same streams, obs and preds used for S3N
+  input_fn = paste0(out_dir, "simobs_network", nw, "_nobs", nobs, "_rep", rep, ".rda")
+  print(paste("Loading input data file", input_fn))
+  load(input_fn)
+  
+  # need to do runtimes after loading because otherwise S3N runtimes overwrites the blank runtimes
+  runtimes = rep(NA, 6)
+  
+  tic("Build LSN"); start_time = Sys.time()
+  edges <- lines_to_lsn(
+    streams = streams,
+    lsn_path = lsn.path,
+    check_topology = TRUE,
+    snap_tolerance = 0, #0.05,
+    topo_tolerance = 0, #20,
+    overwrite = TRUE,
+    use_parallel = TRUE,
+    no_cores = 4
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[1] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  tic("Stream updist and AFV"); start_time = Sys.time()
+  edges <- updist_edges(
+    edges = edges,
+    save_local = TRUE,
+    lsn_path = lsn.path,
+    calc_length = TRUE
+  )
+  edges$TotDASqKM[edges$TotDASqKM == 0] = 0.0001
+  edges <- afv_edges(
+    edges = edges,
+    infl_col = "TotDASqKM",
+    segpi_col = "areaPI",
+    afv_col = "afvArea",
+    lsn_path = lsn.path
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[2] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  # add obs to LSN, compute updist and AFV
+  tic("Add obs to LSN"); start_time = Sys.time()
+  obs <- sites_to_lsn(
+    sites = obs,
+    edges = edges,
+    lsn_path = lsn.path,
+    file_name = "obs",
+    snap_tolerance = 100,
+    save_local = TRUE,
+    overwrite = TRUE
+  )
+  site.list <- updist_sites(
+    sites = list(
+      obs = obs
+    ),
+    edges = edges,
+    length_col = "Length",
+    save_local = TRUE,
+    lsn_path = lsn.path
+  )
+  site.list <- afv_sites(
+    sites = site.list,
+    edges = edges,
+    afv_col = "afvArea",
+    save_local = TRUE,
+    lsn_path = lsn.path
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[3] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  tic("Assemble SSN"); start_time = Sys.time()
+  ssntoy <- ssn_assemble(
+    edges = edges,
+    lsn_path = lsn.path,
+    obs_sites = site.list$obs,
+    ssn_path = paste0("validateS3N/validateS3N_network", nw, "_nobs", nobs, "_rep", rep, ".ssn"),
+    import = TRUE,
+    check = TRUE,
+    afv_col = "afvArea",
+    overwrite = TRUE
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[4] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  tic("Obs-obs distances"); start_time = Sys.time()
+  ssn_create_bigdist(ssntoy, overwrite = TRUE)
+  toc(); stop_time = Sys.time()
+  runtimes[5] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  
+  tic("Estimation"); start_time = Sys.time()
+  ssn_mod <- ssn_lm(
+    formula = DensityPer100m ~ Elevation,
+    ssn.object = ssntoy,
+    tailup_type = "exponential",
+    taildown_type = "none",
+    euclid_type = "none",
+    additive = "afvArea",
+    local = TRUE # when using ssn_create_bigdist, need to use argument local = TRUE in ssn_lm so that it knows to look for the distance matrices in .bmat or .txt files instead of .Rdata files
+  )
+  toc(); stop_time = Sys.time()
+  runtimes[6] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
+  ssnres = coef(summary(ssn_mod))
+  params = c(
+    ssnres$fixed[1:2,1], # beta
+    ssnres$params_object$tailup[1], # sigmasq
+    ssnres$params_object$nugget[1], # tausq
+    ssnres$params_object$tailup[2]/10^3 # lambda
+  )
+  names(params) = c("beta_1", "beta_2", "sigma.sq", "tau.sq", "lambda")
+  
+  print(runtimes)
+  save(params, runtimes,
+       file = paste0(out_dir, "SSN_results_network", nw, "_nobs", nobs, "_rep", rep, ".rda"))
+}
+
+S3N_preproc_and_estimation = function(network, nobs, rep, out_dir, preproc_only = FALSE){
+  
+  runtimes = rep(NA, 5)
+  
+  input_fn = paste0(out_dir, "network", network, "_nobs", nobs, "_initial_data.rda")
+  print(paste("Loading input data file", input_fn))
+  load(input_fn)
   
   # configure the stream network
   tic("Build LSN"); start_time = Sys.time()
@@ -1404,13 +1951,13 @@ S3N_preproc_and_estimation = function(network, rep, out_dir, preproc_only = FALS
   # load the results so that updated obs, preds, streams are written to file
   load(paste0(pwdist_input_dir, "preds_obs_pwdist_input_data.RData"))
   
+  tic("Obs-obs distances"); start_time = Sys.time()
+  # system('cd pwdists; ./scripts/all_obsobs.sh')
+  compute_pwdists_pred_obs(obs, obs, streams, 10, pwdist_obsobs_dir, obs_only = TRUE)
+  toc(); stop_time = Sys.time()
+  runtimes[4] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
   if(!preproc_only){
-    
-    tic("Obs-obs distances"); start_time = Sys.time()
-    system('cd pwdists; ./scripts/all_obsobs.sh')
-    toc(); stop_time = Sys.time()
-    runtimes[4] = as.numeric(difftime(stop_time, start_time), units="secs")
-    
     load(paste0(pwdist_obsobs_dir, "obsobs_dist_wt.rda"))
     
     preds = left_join(
@@ -1456,10 +2003,10 @@ S3N_preproc_and_estimation = function(network, rep, out_dir, preproc_only = FALS
     names(params)[5] = "lambda"
     
     save(streams, obs, preds, params, runtimes,
-         file = paste0(out_dir, "S3N_results_network", network, "_rep", rep, ".rda"))
+         file = paste0(out_dir, "S3N_results_network", network, "_nobs", nobs, "_rep", rep, ".rda"))
   } else {
     save(streams, obs, preds, runtimes,
-         file = paste0(out_dir, "S3N_results_network", network, "_rep", rep, ".rda"))
+         file = paste0(out_dir, "S3N_results_network", network, "_nobs", nobs, "_rep", rep, ".rda"))
   }
 }
 
@@ -1476,10 +2023,12 @@ get_preds_batch_info = function(npreds_only, nproc = 4){
   }
 }
 
-SSN_preproc_and_estimation = function(network, rep, out_dir, preproc_only, lsn.path){
+SSN_preproc_and_estimation = function(network, nobs, rep, out_dir, preproc_only, lsn.path){
   
-  print(paste("Loading", paste0(out_dir, "S3N_results_network", network, "_rep", rep, ".rda")))
-  load(paste0(out_dir, "S3N_results_network", network, "_rep", rep, ".rda"))
+  # loads the same streams, obs and preds used for S3N
+  input_fn = paste0(out_dir, "S3N_results_network", network, "_nobs", nobs, "_rep", rep, ".rda")
+  print(paste("Loading input data file", input_fn))
+  load(input_fn)
   
   # need to do runtimes after loading because otherwise S3N runtimes overwrites the blank runtimes
   runtimes = rep(NA, 6)
@@ -1489,9 +2038,11 @@ SSN_preproc_and_estimation = function(network, rep, out_dir, preproc_only, lsn.p
     streams = streams,
     lsn_path = lsn.path,
     check_topology = TRUE,
-    snap_tolerance = 0.05,
-    topo_tolerance = 20,
-    overwrite = TRUE
+    snap_tolerance = 0, #0.05,
+    topo_tolerance = 0, #20,
+    overwrite = TRUE,
+    use_parallel = TRUE,
+    no_cores = 4
   )
   toc(); stop_time = Sys.time()
   runtimes[1] = as.numeric(difftime(stop_time, start_time), units="secs")
@@ -1558,12 +2109,12 @@ SSN_preproc_and_estimation = function(network, rep, out_dir, preproc_only, lsn.p
   toc(); stop_time = Sys.time()
   runtimes[4] = as.numeric(difftime(stop_time, start_time), units="secs")
   
+  tic("Obs-obs distances"); start_time = Sys.time()
+  ssn_create_bigdist(ssntoy, overwrite = TRUE)
+  toc(); stop_time = Sys.time()
+  runtimes[5] = as.numeric(difftime(stop_time, start_time), units="secs")
+  
   if(!preproc_only){
-    tic("Obs-obs distances"); start_time = Sys.time()
-    ssn_create_distmat(ssntoy, overwrite = TRUE)
-    toc(); stop_time = Sys.time()
-    runtimes[5] = as.numeric(difftime(stop_time, start_time), units="secs")
-    
     tic("Estimation"); start_time = Sys.time()
     ssn_mod <- ssn_lm(
       formula = DensityPer100m ~ Elevation,
@@ -1571,7 +2122,8 @@ SSN_preproc_and_estimation = function(network, rep, out_dir, preproc_only, lsn.p
       tailup_type = "exponential",
       taildown_type = "none",
       euclid_type = "none",
-      additive = "afvArea"
+      additive = "afvArea",
+      local = TRUE # when using ssn_create_bigdist, need to use argument local = TRUE in ssn_lm so that it knows to look for the distance matrices in .bmat or .txt files instead of .Rdata files
     )
     toc(); stop_time = Sys.time()
     runtimes[6] = as.numeric(difftime(stop_time, start_time), units="secs")
@@ -1587,12 +2139,12 @@ SSN_preproc_and_estimation = function(network, rep, out_dir, preproc_only, lsn.p
     
     print(runtimes)
     save(params, runtimes,
-         file = paste0(out_dir, "SSN_results_network", network, "_rep", rep, ".rda"))
+         file = paste0(out_dir, "SSN_results_network", network, "_nobs", nobs, "_rep", rep, ".rda"))
     
   } else{
     print(runtimes)
     save(runtimes,
-         file = paste0(out_dir, "SSN_results_network", network, "_rep", rep, ".rda"))
+         file = paste0(out_dir, "SSN_results_network", network, "_nobs", nobs, "_rep", rep, ".rda"))
   }
 }
 
@@ -1621,7 +2173,7 @@ combine_runtimes_onemodel = function(bench_res_dir, network, nreps, model, prepr
   # "Estimation" = BRISC_estimation_stream
   if(model == "S3N"){
     tasks = c("Build LSN", "Stream updist and AFV", "Add obs to LSN", 
-                "Obs-obs distances", "Estimation")
+              "Obs-obs distances", "Estimation")
   }
   
   if(is.na(nreps)){
@@ -1664,7 +2216,7 @@ combine_runtimes_onemodel = function(bench_res_dir, network, nreps, model, prepr
   
   stats$task = tasks
   stats = relocate(stats, task)
-    
+  
   return(list(runtimes_all = runtimes_all, stats = stats))
 }
 
@@ -1704,12 +2256,12 @@ combine_runtimes_bothmodels = function(bench_res_dir, network,
                        sum(obs_only$SSN_avg, na.rm = TRUE)
                      ),
                      SSN_sd = NA)
-    
-    return(list(
-      runtimes_S3N = runtimes_S3N, 
-      runtimes_SSN = runtimes_SSN,
-      obs_only = obs_only
-    ))
+  
+  return(list(
+    runtimes_S3N = runtimes_S3N, 
+    runtimes_SSN = runtimes_SSN,
+    obs_only = obs_only
+  ))
 }
 
 get_summary_for_table = function(network, benchres){
@@ -1778,7 +2330,7 @@ combine_params_bothmodels = function(bench_res_dir, network, nreps_S3N, nreps_SS
   plot_data$Model = c(
     rep("S3N", nreps_S3N),
     rep("SSN", nreps_SSN)
-    )
+  )
   plot_data_long = pivot_longer(plot_data, 
                                 cols = beta_1:lambda, 
                                 names_to = "Parameter",
@@ -1813,7 +2365,7 @@ combine_params_bothmodels = function(bench_res_dir, network, nreps_S3N, nreps_SS
       alpha = 0.6,
       # pattern_fill = "black", # Color of the pattern itself
       pattern_density = 0.05
-      ) +
+    ) +
     geom_vline(aes(xintercept = Truth, group = Model, 
                    color = "Truth", linetype = "Truth", linewidth = "Truth")) + #, color = "black") +
     geom_vline(aes(xintercept = avg_S3N, group = Model, 
@@ -1835,8 +2387,8 @@ combine_params_bothmodels = function(bench_res_dir, network, nreps_S3N, nreps_SS
     scale_color_manual(values = c("Truth" = 'black', 
                                   "S3N" = plot_colors[1], 
                                   "SSN" = plot_colors[2]), name = "Legend") +
-                                  # "S3N" = "deeppink3", 
-                                  # "SSN" = "deepskyblue3"), name = "Legend") +
+    # "S3N" = "deeppink3", 
+    # "SSN" = "deepskyblue3"), name = "Legend") +
     theme(
       legend.title = element_blank(),
       # legend.title=element_text(size=8),
@@ -2073,28 +2625,28 @@ plot_pred_density_map = function(streams, preds_supp, common_name, out_dir,
     left_join(select(preds_supp, COMID, DensityPer100m_pred), by="COMID") %>%
     mutate(DensityPer100m_pred = ifelse(DensityPer100m_pred <= 1e-8, 1e-8, DensityPer100m_pred)) %>%
     mutate(log_density_pred = log10(DensityPer100m_pred))
-    # mutate(DensityQuantile = factor(
-    #   case_when(
-    #     log10(DensityPer100m_pred) <= density_levels[1] ~ as.character(density_levels[1]),
-    #     log10(DensityPer100m_pred) > density_levels[1] & log10(DensityPer100m_pred) <= density_levels[2] ~ as.character(density_levels[2]),
-    #     log10(DensityPer100m_pred) > density_levels[2] & log10(DensityPer100m_pred) <= density_levels[3]  ~ as.character(density_levels[3]),
-    #     log10(DensityPer100m_pred) > density_levels[3] & log10(DensityPer100m_pred) <= density_levels[4]   ~ as.character(density_levels[4]),
-    #     log10(DensityPer100m_pred) > density_levels[4] & log10(DensityPer100m_pred) <= density_levels[5]   ~ as.character(density_levels[5]),
-    #     log10(DensityPer100m_pred) > density_levels[5] & log10(DensityPer100m_pred) <= density_levels[6]   ~ as.character(density_levels[6]),
-    #     log10(DensityPer100m_pred) > density_levels[6] & log10(DensityPer100m_pred) <= density_levels[7]   ~ as.character(density_levels[7]),
-    #     log10(DensityPer100m_pred) > density_levels[7] & log10(DensityPer100m_pred) <= density_levels[8]   ~ as.character(density_levels[8]),
-    #     log10(DensityPer100m_pred) > density_levels[8] & log10(DensityPer100m_pred) <= density_levels[9]   ~ as.character(density_levels[9]),
-    #     log10(DensityPer100m_pred) > density_levels[9] ~ paste0("> ", density_levels[9])
-    #   ),
-    #   levels = c(as.character(density_levels), paste0("> ", density_levels[9]))
-    #   # case_when(
-    #   #                                DensityPer100m_pred <= 0.02 ~ "< 0.02",
-    #   #   DensityPer100m_pred > 0.02 & DensityPer100m_pred <= 0.34 ~ "0.02 - 0.34",
-    #   #   DensityPer100m_pred > 0.34 & DensityPer100m_pred <= 1.3  ~ "0.34 - 1.3",
-    #   #   DensityPer100m_pred > 1.30 & DensityPer100m_pred <= 68   ~ "1.3 - 68"
-    #   # ),
-    #   # levels = c("< 0.02", "0.02 - 0.34", "0.34 - 1.3", "1.3 - 68")
-    # ))
+  # mutate(DensityQuantile = factor(
+  #   case_when(
+  #     log10(DensityPer100m_pred) <= density_levels[1] ~ as.character(density_levels[1]),
+  #     log10(DensityPer100m_pred) > density_levels[1] & log10(DensityPer100m_pred) <= density_levels[2] ~ as.character(density_levels[2]),
+  #     log10(DensityPer100m_pred) > density_levels[2] & log10(DensityPer100m_pred) <= density_levels[3]  ~ as.character(density_levels[3]),
+  #     log10(DensityPer100m_pred) > density_levels[3] & log10(DensityPer100m_pred) <= density_levels[4]   ~ as.character(density_levels[4]),
+  #     log10(DensityPer100m_pred) > density_levels[4] & log10(DensityPer100m_pred) <= density_levels[5]   ~ as.character(density_levels[5]),
+  #     log10(DensityPer100m_pred) > density_levels[5] & log10(DensityPer100m_pred) <= density_levels[6]   ~ as.character(density_levels[6]),
+  #     log10(DensityPer100m_pred) > density_levels[6] & log10(DensityPer100m_pred) <= density_levels[7]   ~ as.character(density_levels[7]),
+  #     log10(DensityPer100m_pred) > density_levels[7] & log10(DensityPer100m_pred) <= density_levels[8]   ~ as.character(density_levels[8]),
+  #     log10(DensityPer100m_pred) > density_levels[8] & log10(DensityPer100m_pred) <= density_levels[9]   ~ as.character(density_levels[9]),
+  #     log10(DensityPer100m_pred) > density_levels[9] ~ paste0("> ", density_levels[9])
+  #   ),
+  #   levels = c(as.character(density_levels), paste0("> ", density_levels[9]))
+  #   # case_when(
+  #   #                                DensityPer100m_pred <= 0.02 ~ "< 0.02",
+  #   #   DensityPer100m_pred > 0.02 & DensityPer100m_pred <= 0.34 ~ "0.02 - 0.34",
+  #   #   DensityPer100m_pred > 0.34 & DensityPer100m_pred <= 1.3  ~ "0.34 - 1.3",
+  #   #   DensityPer100m_pred > 1.30 & DensityPer100m_pred <= 68   ~ "1.3 - 68"
+  #   # ),
+  #   # levels = c("< 0.02", "0.02 - 0.34", "0.34 - 1.3", "1.3 - 68")
+  # ))
   # density_quantiles = as.numeric(quantile(streams$DensityPer100m_pred, probs = seq(0,1,0.1)))
   # streams$DensityQuantile = unlist(map(
   #   streams$DensityPer100m_pred, 
@@ -2146,11 +2698,11 @@ plot_pred_density_map = function(streams, preds_supp, common_name, out_dir,
     #   labels = qtls #round(qtls, 2)
     # ) +
     scale_color_steps(
-    breaks = qtls,
-    high = "#132B43",
-    low = "#BFEFFF" #"#56B1F7"#,
-    # labels = qtls #round(qtls, 2)
-      ) +
+      breaks = qtls,
+      high = "#132B43",
+      low = "#BFEFFF" #"#56B1F7"#,
+      # labels = qtls #round(qtls, 2)
+    ) +
     # scale_color_manual(values = my_colors)  +
     # scale_color_discrete(name = "Fish density per 100m") +
     # geom_sf(data = preds[preds$DensityPer100m_pred > 10,],
@@ -2166,7 +2718,7 @@ plot_pred_density_map = function(streams, preds_supp, common_name, out_dir,
     ggthemes::theme_map() +
     theme(
       legend.position = "right"
-      ) + 
+    ) + 
     guides(colour = guide_coloursteps(show.limits = TRUE))
   
   if(save_to_file){
@@ -2237,11 +2789,12 @@ make_double_plot = function(streams,
     p2,
     widths = c(2,2)
   )
-
+  
   ggsave(comb,
          filename = paste0(out_dir, "Region5_pred_density_map_",
                            str_replace_all(common_name1, " ", "_"),
                            str_replace_all(common_name2, " ", "_"), ".png"),
          width = 9, height = 4, units = "in")
 }
+
 

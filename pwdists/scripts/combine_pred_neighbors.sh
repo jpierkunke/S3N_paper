@@ -13,7 +13,7 @@ nneighbors=$3
 echo There are $num_batches batches of size $batch_size
 echo with $nneighbors neighbors per pred point
 
-if [ ! -z $SLURM_JOB_NAME ]; then module load R-bundle-CRAN; echo "module loaded"; else echo "module not loaded"; fi
+# if [ ! -z $SLURM_JOB_NAME ]; then module load R-bundle-CRAN; echo "module loaded"; else echo "module not loaded"; fi
 
-Rscript code/combine_pred_neighbors.R $batch_size $nneighbors &> R_outfiles/combine_pred_neighbors_$batch_size_$nneighbors.Rout
+Rscript code/combine_pred_neighbors.R $batch_size $nneighbors # &> R_outfiles/combine_pred_neighbors_$batch_size_$nneighbors.Rout
 
